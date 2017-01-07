@@ -60,20 +60,23 @@ class IsaacTracker(object):
         # Create drawing tool to use to draw everything - it'll create its own screen
         drawing_tool = DrawingTool(self.file_prefix)
         drawing_tool.set_window_title_info(update_notifier=update_notifier)
-        parser = LogParser(self.file_prefix, self.tracker_version)
         opt = Options()
+
+        parser = LogParser(self.file_prefix, self.tracker_version)
 
         event_result = None
         state = None
         custom_title_enabled = opt.custom_title_enabled
         read_from_server = opt.read_from_server
         write_to_server = opt.write_to_server
+        game_version = opt.game_version
         state_version = -1
         twitch_username = None
         new_states_queue = []
         screen_error_message = None
         retry_in = 0
         update_timer = 2
+        last_game_version = None
 
         while event_result != Event.DONE:
             # Check for events and handle them
@@ -106,6 +109,10 @@ class IsaacTracker(object):
                 write_to_server = opt.write_to_server
                 drawing_tool.set_window_title_info(uploading=opt.write_to_server)
 
+            if opt.game_version != game_version:
+                parser.reset()
+                game_version = opt.game_version
+
             # Force refresh state if we updated options or if we need to retry
             # to contact the server.
             if (event_result == Event.OPTIONS_UPDATE or
@@ -133,7 +140,7 @@ class IsaacTracker(object):
                         if int(json_version) > state_version:
                             # FIXME better handling of 404 error ?
                             json_state = urllib2.urlopen(base_url).read()
-                            json_dict = json.loads(json_state)
+                            json_dict = json.loads(json_state, "utf-8")
                             new_state = TrackerState.from_json(json_dict)
                             if new_state is None:
                                 raise Exception
@@ -190,7 +197,7 @@ class IsaacTracker(object):
             if len(new_states_queue) > 0:
                 (state_timestamp, new_state) = new_states_queue[0]
                 current_timestamp = int(time.time())
-                if current_timestamp - state_timestamp >= opt.read_delay or state is None:
+                if current_timestamp - state_timestamp >= opt.read_delay or opt.read_delay == 0 or state is None:
                     state = new_state
                     new_states_queue.pop(0)
                     drawing_tool.set_window_title_info(updates_queued=len(new_states_queue))
@@ -201,13 +208,18 @@ class IsaacTracker(object):
                     # Retry to read the state in 5*update_timer (aka 10 sec in read mode)
                     retry_in = 5
                 else:
-                    screen_error_message = "log.txt not found. Put the RebirthItemTracker folder inside the isaac folder, next to log.txt"
+                    screen_error_message = "log.txt for " + opt.game_version + " not found. Make sure you have the right game selected in options."
 
             if screen_error_message is not None:
                 drawing_tool.write_error_message(screen_error_message)
             else:
                 # We got a state, now we draw it
                 drawing_tool.draw_state(state)
+
+            # if we're watching someone and they change their game version, it can require us to reset
+            if state and last_game_version != state.game_version:
+                drawing_tool.reset_options()
+                last_game_version = state.game_version
 
             drawing_tool.tick()
             framecount += 1

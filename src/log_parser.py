@@ -9,23 +9,23 @@ import zipfile  # For compressing the log files of past runs
 from game_objects.item  import Item
 from game_objects.floor import Floor, Curse
 from game_objects.state  import TrackerState
+from options import Options
 
 class LogParser(object):
     """
     This class load Isaac's log file, and incrementally modify a state representing this log
     """
     def __init__(self, prefix, tracker_version):
-        self.state = TrackerState("", tracker_version)
+        self.state = TrackerState("", tracker_version, Options().game_version)
         self.log = logging.getLogger("tracker")
         self.file_prefix = prefix
 
-        self.game_version = ""
-        self.__reset()
+        self.reset()
 
         # FIXME run summary.
         self.run_ended = 0
 
-    def __reset(self):
+    def reset(self):
         """Reset variable specific to the log file/run"""
         # Variables describing the parser state
         self.getting_start_items = False
@@ -38,7 +38,7 @@ class LogParser(object):
         self.run_start_line = 0
         self.seek = 0
         self.spawned_coop_baby = 0
-
+        self.state.reset(self.current_seed, Options().game_version)
 
 
     def parse(self):
@@ -46,6 +46,8 @@ class LogParser(object):
         Parse the log file and return a TrackerState object,
         or None if the log file couldn't be found
         """
+
+        self.opt = Options()
         # Attempt to load log_file
         if not self.__load_log_file():
             return None
@@ -66,19 +68,21 @@ class LogParser(object):
         """
         Parse a line using the (line_number, line) tuple
         """
-        if line.startswith('Mom clear time:'):
-            self.__parse_boss(line)
+        #in afterbirth+, all lines start with this. we want to slice it off.
+        info_prefix = '[INFO] - '
+        if line.startswith(info_prefix):
+            line = line[len(info_prefix):]
 
         # Check and handle the end of the run; the order is important
         # - we want it after boss kill but before "RNG Start Seed"
         self.__check_end_run(line_number + self.seek, line)
 
         if line.startswith('RNG Start Seed:'):
-            self.__parse_seed(line)
+            self.__parse_seed(line, line_number)
         if line.startswith('Room'):
             self.__parse_room(line)
         if line.startswith('Level::Init'):
-            self.__parse_floor(line_number, line)
+            self.__parse_floor(line)
         if line.startswith("Curse"):
             self.__parse_curse(line)
         if line.startswith("Spawn co-player!"):
@@ -89,36 +93,31 @@ class LogParser(object):
         if line.startswith('Adding collectible'):
             self.__parse_item(line_number, line)
 
-
-    def __parse_boss(self, line):
-        """ Parse a boss line """
-        # TODO "Boss %i added to SaveState", Mom:6, It lives:25,
-        # Satan/The Lamb:24/54 Isaac/???:39/40, Mega Satan:55
-        kill_time = int(line.split(" ")[-1])
-        # If you re-enter a room you get a "mom clear time" again,
-        # check for that (can you fight the same boss twice?)
-        # FIXME right now we only have support for Mom (6)
-        self.state.add_boss("6")
-
-    def __parse_seed(self, line):
+    def __parse_seed(self, line, line_number):
         """ Parse a seed line """
         # This assumes a fixed width, but from what I see it seems safe
         self.current_seed = line[16:25]
 
+        # when we see a new seed, that means it's a new run
+        self.log.debug("Starting new run, seed: %s", self.current_seed)
+        self.run_start_line = line_number + self.seek
+        self.state.reset(self.current_seed, Options().game_version)
+        self.run_ended = False
+
     def __parse_room(self, line):
         """ Parse a room line """
-        self.current_room = re.search(r'\((.*)\)', line).group(1)
         if 'Start Room' not in line:
             self.getting_start_items = False
-        self.log.debug("Entered room: %s", self.current_room)
 
-    def __parse_floor(self, line_number, line):
+    def __parse_floor(self, line):
         """ Parse the floor in line and push it to the state """
         # Create a floor tuple with the floor id and the alternate id
-        if self.game_version == "Afterbirth":
+        if self.opt.game_version == "Afterbirth" or self.opt.game_version == "Afterbirth+":
             regexp_str = r"Level::Init m_Stage (\d+), m_StageType (\d+)"
-        else:
+        elif self.opt.game_version == "Rebirth" or self.opt.game_version == "Antibirth":
             regexp_str = r"Level::Init m_Stage (\d+), m_AltStage (\d+)"
+        else:
+            return
         floor_tuple = tuple([re.search(regexp_str, line).group(x) for x in [1, 2]])
 
         self.getting_start_items = True
@@ -127,7 +126,7 @@ class LogParser(object):
         alt = floor_tuple[1]
 
         # Special handling for cath and chest and Afterbirth
-        if self.game_version == "Afterbirth":
+        if self.opt.game_version == "Afterbirth" or self.opt.game_version == "Afterbirth+":
             # In Afterbirth Cath is an alternate of Sheol (which is 10)
             # and Chest is an alternate of Dark room (which is 11)
             if floor == 10 and alt == '0':
@@ -142,14 +141,6 @@ class LogParser(object):
         # Greed mode
         if alt == '3':
             floor_id += 'g'
-
-        # when we see a new floor 1, that means a new run has started
-        if floor == 1:
-            self.log.debug("Starting new run, seed: %s", self.current_seed)
-            self.run_start_line = line_number + self.seek
-            self.state.reset(self.current_seed)
-            self.run_ended = False
-
 
         self.state.add_floor(Floor(floor_id))
         return True
@@ -195,21 +186,21 @@ class LogParser(object):
         """
         path = None
         logfile_location = ""
-        game_names = ("Afterbirth", "Rebirth")
+        version_path_fragment = self.opt.game_version
+        if version_path_fragment == "Antibirth":
+            version_path_fragment = "Rebirth"
+
         if platform.system() == "Windows":
             logfile_location = os.environ['USERPROFILE'] + '/Documents/My Games/Binding of Isaac {}/'
         elif platform.system() == "Linux":
             logfile_location = os.getenv('XDG_DATA_HOME',
                 os.path.expanduser('~') + '/.local/share') + '/binding of isaac {}/'
-            game_names = ("afterbirth", "rebirth")
+            version_path_fragment = version_path_fragment.lower()
         elif platform.system() == "Darwin":
             logfile_location = os.path.expanduser('~') + '/Library/Application Support/Binding of Isaac {}/'
-        if os.path.exists(logfile_location.format(game_names[0])):
-            logfile_location = logfile_location.format(game_names[0])
-            self.game_version = "Afterbirth"
-        else:
-            logfile_location = logfile_location.format(game_names[1])
-            self.game_version = "Rebirth"
+
+
+        logfile_location = logfile_location.format(version_path_fragment)
 
         for check in (self.file_prefix + '../log.txt', logfile_location + 'log.txt'):
             if os.path.isfile(check):
@@ -221,7 +212,7 @@ class LogParser(object):
         cached_length = len(self.content)
         file_size = os.path.getsize(path)
         if cached_length > file_size or cached_length == 0: # New log file or first time loading the log
-            self.__reset()
+            self.reset()
             self.content = open(path, 'rb').read()
         elif cached_length < file_size:  # Append existing content
             f = open(path, 'rb')

@@ -60,8 +60,10 @@ class DrawingTool(object):
         self.clock = None
         self.win_info = None
         self.screen = None
+        self.show_floors = False
         self.window_title_info = WindowTitleInfo()
         self.start_pygame()
+
 
     def start_pygame(self):
         """ Initialize pygame system stuff and draw empty window """
@@ -160,6 +162,7 @@ class DrawingTool(object):
                     pygame.event.set_allowed([QUIT, MOUSEBUTTONDOWN, KEYDOWN, MOUSEMOTION])
                     self.reset_options()
                     self.reset()
+
                     if self.state is not None:
                         self.__reflow()
                     return Event.OPTIONS_UPDATE
@@ -241,7 +244,7 @@ class DrawingTool(object):
                     drawable_item.y,
                     self
                 )
-            if not floor_to_draw.is_drawn and opt.show_floors:
+            if not floor_to_draw.is_drawn and self.show_floors:
                 floor_to_draw.draw()
             drawable_item.draw(selected=(idx == self.selected_item_index))
 
@@ -249,7 +252,7 @@ class DrawingTool(object):
 
         # Also draw the floor if we hit the end or if the list is empty,
         # so the current floor is visible
-        if opt.show_floors and current_floor is not None:
+        if self.show_floors and current_floor is not None:
             if floor_to_draw is None or (floor_to_draw is not None and
                                          floor_to_draw.floor != current_floor):
                 x, y = self.next_item
@@ -300,7 +303,7 @@ class DrawingTool(object):
                 available_width -= 2
             max_col = floor(available_width/chosen_icon_footprint)
             row_height = chosen_icon_footprint
-            if opt.show_floors:
+            if self.show_floors:
                 row_height += self.text_margin_size
             # height also has to take into account the size of the items on the edges, so they never flow off the bottom
             available_height = opt.height - self.text_height - (icon_size - chosen_icon_footprint)
@@ -402,15 +405,31 @@ class DrawingTool(object):
     def get_scaled_icon(self, path, scale):
         return pygame.transform.scale(self.get_image(path), (scale, scale))
 
+    def make_path(self, imagename, disable_glow, antibirth=False):
+        path = self.file_prefix + "/collectibles/"
+        if antibirth:
+            path += "antibirth/"
+        if Options().make_items_glow and not disable_glow:
+            path += "glow/"
+        path += imagename
+        return path.replace('/', os.sep).replace('\\', os.sep)
+
     def get_image(self, imagename, disable_glow=False):
         image = self._image_library.get(imagename)
         if image is None:
-            path = self.file_prefix + "/collectibles/"
-            if Options().make_items_glow and not disable_glow:
-                path += "glow/"
-            path += imagename
-            canonicalized_path = path.replace('/', os.sep).replace('\\', os.sep)
-            image = pygame.image.load(canonicalized_path)
+            path = ""
+            need_path = True
+
+            # if we're in antibirth mode, check if there's an antibirth version of the image first
+            if self.state and self.state.game_version == "Antibirth":
+                path = self.make_path(imagename, disable_glow, True)
+                if os.path.isfile(path):
+                    need_path = False
+
+            if need_path:
+                path = self.make_path(imagename, disable_glow)
+
+            image = pygame.image.load(path)
             size_multiplier = Options().size_multiplier
             scaled_image = image
             # Resize image iff we need to
@@ -496,6 +515,7 @@ class DrawingTool(object):
         # Anything that gets calculated and cached based on something in options
         # now needs to be flushed
         self.text_margin_size = font_size
+        self.show_floors = opt.show_floors and (not self.state or self.state.game_version != "Antibirth")
         try:
             self.font = pygame.font.SysFont(
                 opt.show_font,
@@ -521,6 +541,8 @@ class DrawingTool(object):
             self.text_height = self.write_message(" ")
         else:
             self.text_height = 0
+
+
 
     def reset(self):
         self.selected_item_index = None
