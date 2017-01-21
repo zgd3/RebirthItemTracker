@@ -1,11 +1,8 @@
 """ This module handles everything related to log parsing """
-import time     # For getting the current timestamp
-import StringIO # For writing out the log to the "run_logs" folder
 import platform # For determining what operating system the script is being run on
 import re       # For parsing the log file (regular expressions)
 import os       # For working with files on the operating system
 import logging  # For logging
-import zipfile  # For compressing the log files of past runs
 from game_objects.item  import Item
 from game_objects.floor import Floor, Curse
 from game_objects.state  import TrackerState
@@ -22,9 +19,6 @@ class LogParser(object):
 
         self.reset()
 
-        # FIXME run summary.
-        self.run_ended = 0
-
     def reset(self):
         """Reset variable specific to the log file/run"""
         # Variables describing the parser state
@@ -40,7 +34,6 @@ class LogParser(object):
         self.spawned_coop_baby = 0
         self.state.reset(self.current_seed, Options().game_version)
 
-
     def parse(self):
         """
         Parse the log file and return a TrackerState object,
@@ -53,7 +46,8 @@ class LogParser(object):
             return None
         self.splitfile = self.content.splitlines()
 
-        self.getting_start_items = False # This will become true if we are getting starting items
+        # This will become true if we are getting starting items
+        self.getting_start_items = False
 
         # Process log's new output
         for current_line_number, line in enumerate(self.splitfile[self.seek:]):
@@ -63,20 +57,19 @@ class LogParser(object):
         self.seek = len(self.splitfile)
         return self.state
 
-
     def __parse_line(self, line_number, line):
         """
         Parse a line using the (line_number, line) tuple
         """
-        #in afterbirth+, all lines start with this. we want to slice it off.
+        # In Afterbirth+, nearly all lines start with this.
+        # We want to slice it off.
         info_prefix = '[INFO] - '
         if line.startswith(info_prefix):
             line = line[len(info_prefix):]
 
-        # Check and handle the end of the run; the order is important
-        # - we want it after boss kill but before "RNG Start Seed"
-        self.__check_end_run(line_number + self.seek, line)
-
+        #TODO: also parse version number for non-AB+
+        if line.startswith('Binding of Isaac: Afterbirth+'):
+            self.__parse_version_number(line)
         if line.startswith('RNG Start Seed:'):
             self.__parse_seed(line, line_number)
         if line.startswith('Room'):
@@ -91,13 +84,18 @@ class LogParser(object):
             self.log.debug("Reroll detected!")
             self.state.reroll()
         if line.startswith('Adding collectible'):
-            self.__parse_item(line_number, line)
+            self.__parse_item_add(line_number, line)
+        if line.startswith('Lua Debug: Removing collectible'):
+            self.__parse_item_remove(line_number, line)
 
     def __trigger_new_run(self, line_number):
         self.log.debug("Starting new run, seed: %s", self.current_seed)
         self.run_start_line = line_number + self.seek
         self.state.reset(self.current_seed, Options().game_version)
-        self.run_ended = False
+
+    def __parse_version_number(self, line):
+        offset = len('Binding of Isaac: Afterbirth+')
+        self.state.version_number = line[offset:]
 
     def __parse_seed(self, line, line_number):
         """ Parse a seed line """
@@ -126,6 +124,7 @@ class LogParser(object):
         floor_tuple = tuple([re.search(regexp_str, line).group(x) for x in [1, 2]])
 
         self.getting_start_items = True
+
         # Assume floors aren't cursed until we see they are
         floor = int(floor_tuple[0])
         alt = floor_tuple[1]
@@ -133,20 +132,20 @@ class LogParser(object):
         if floor == 1 and self.opt.game_version != "Antibirth":
             self.__trigger_new_run(line_number)
 
-
-        # Special handling for cath and chest and Afterbirth
+        # Special handling for the Cathedral and The Chest and Afterbirth
         if self.opt.game_version == "Afterbirth" or self.opt.game_version == "Afterbirth+":
-            # In Afterbirth Cath is an alternate of Sheol (which is 10)
-            # and Chest is an alternate of Dark room (which is 11)
+            # In Afterbirth, Cath is an alternate of Sheol (which is 10)
+            # and Chest is an alternate of Dark Room (which is 11)
             if floor == 10 and alt == '0':
                 floor -= 1
             elif floor == 11 and alt == '1':
                 floor += 1
         else:
-            # In Rebirth floors have different numbers
+            # In Rebirth, floors have different numbers
             if alt == '1' and (floor == 9 or floor == 11):
                 floor += 1
         floor_id = 'f' + str(floor)
+
         # Greed mode
         if alt == '3':
             floor_id += 'g'
@@ -163,13 +162,13 @@ class LogParser(object):
         if line.startswith("Curse of the Lost!"):
             self.state.add_curse(Curse.Lost)
 
-    def __parse_item(self, line_number, line):
-        """ Parse an Item and push it to the state """
+    def __parse_item_add(self, line_number, line):
+        """ Parse an item and push it to the state """
         if len(self.splitfile) > 1 and self.splitfile[line_number + self.seek - 1] == line:
             self.log.debug("Skipped duplicate item line from baby presence")
             return False
         space_split = line.split(" ") # Hacky string manipulation
-        item_id = space_split[2] # A string has the form of "Adding collectible 105 (The D6)"
+        item_id = space_split[2] # When you pick up an item, this has the form: "Adding collectible 105 (The D6)"
 
         # Check if the item ID exists
         if not Item.contains_info(item_id):
@@ -181,12 +180,28 @@ class LogParser(object):
                 and self.state.contains_item(item_id):
             self.log.debug("Skipped duplicate item line from baby entry")
             return False
-        #it's a blind pickup if we're on a blind floor and they don't have the black candle
+
+        # It's a blind pickup if we're on a blind floor and we don't have the Black Candle
         blind_pickup = self.state.last_floor.floor_has_curse(Curse.Blind) and not self.state.contains_item('260')
         added = self.state.add_item(Item(item_id, self.state.last_floor, self.getting_start_items, blind=blind_pickup))
         if not added:
             self.log.debug("Skipped adding item %s to avoid space-bar duplicate", item_id)
         return True
+
+    def __parse_item_remove(self, line_number, line):
+        """ Parse an item and remove it from the state """
+        space_split = line.split(" ") # Hacky string manipulation
+        item_id = space_split[4] # When you lose an item, this has the form: "Lua Debug: Removing collectible 105"
+
+        # Check if the item ID exists
+        if not Item.contains_info(item_id):
+            return False
+
+        self.log.debug("Removed item. id: %s", item_id)
+
+        # A check will be made inside the remove_item function
+        # to see if this item is actually in our inventory or not.
+        return self.state.remove_item(item_id)
 
     def __load_log_file(self):
         """
@@ -228,47 +243,4 @@ class LogParser(object):
             f.seek(cached_length + 1)
             self.content += f.read()
         return True
-
-
-# Above are legacy method for handling end of run
-    def __check_end_run(self, line_number, line):
-        if not self.run_ended:
-            died_to = ""
-            end_type = ""
-            # FIXME right now I don't think boss detection in the log is working properly
-            if self.state.last_boss and self.state.last_boss[0] in ['???', 'The Lamb', 'Mega Satan']:
-                end_type = "Won"
-            elif (self.state.seed != '') and line.startswith('RNG Start Seed:'):
-                end_type = "Reset"
-            elif line.startswith('Game Over.'):
-                end_type = "Death"
-                died_to = re.search(r'(?i)Killed by \((.*)\) spawned', line).group(1)
-            if end_type:
-                last_run = {
-                    "bosses":   self.state.bosses,
-                    "items":    self.state.item_list,
-                    "seed":     self.state.seed,
-                    "died_to":  died_to,
-                    "end_type": end_type
-                }
-                self.run_ended = True
-                self.log.debug("End of Run! %s", last_run)
-                if end_type != "Reset":
-                    self.__save_file(self.run_start_line, line_number, last_run)
-
-    def __save_file(self, start, end, last_run):
-        dir_name = self.file_prefix + "run_logs"
-        if not os.path.isdir(dir_name):
-            os.mkdir(dir_name)
-        timestamp = int(time.time())
-        seed = self.state.seed.replace(" ", "")
-        data = "\n".join(self.splitfile[start:end + 1])
-        # FIXME improve
-        data = "%s\nRUN_OVER_LINE\n%s" % (data, last_run)
-        run_name = "%s%s.log" % (seed, timestamp)
-        in_memory_file = StringIO.StringIO()
-        with zipfile.ZipFile(in_memory_file, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(run_name, data)
-        with open(self.file_prefix + "run_logs/" + run_name + ".zip", "wb") as f:
-            f.write(in_memory_file.getvalue())
 

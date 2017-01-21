@@ -9,8 +9,11 @@ class TrackerState(Serializable):
     """This class represents a tracker state, and handle the logic to
     modify it while keeping it coherent
     """
-    serialize = [('seed', basestring), ('floor_list', list),
-                 ('item_list', list), ('bosses', list), ('tracker_version', basestring), ('game_version', basestring)]
+    serialize = [('seed', basestring),
+                 ('floor_list', list),
+                 ('item_list', list),
+                 ('tracker_version', basestring),
+                 ('game_version', basestring)]
     def __init__(self, seed, tracker_version, game_version):
         self.reset(seed, game_version)
         self.tracker_version = tracker_version
@@ -27,7 +30,6 @@ class TrackerState(Serializable):
         self.game_version = game_version
         self.floor_list = []
         self.item_list = []
-        self.bosses = []
         self.player_stats = {}
         self.player_transforms = {}
         for stat in ItemInfo.stat_list:
@@ -53,7 +55,7 @@ class TrackerState(Serializable):
     def add_item(self, item):
         """
         Add an item to the current run, and update player's stats accordingly
-        Return a tuple (boolean, list).
+        Return a boolean.
         The boolean is true if the item has been added, false otherwise.
         """
 
@@ -65,6 +67,30 @@ class TrackerState(Serializable):
             return True
         else:
             return False
+
+    def remove_item(self, item_id):
+        """
+        Remove the given item from the current run, and update player's stats accordingly.
+        If we have multiples of that item, the removed item is the most recent of them.
+        Return a boolean.
+        The boolean is true if an item has been removed, false otherwise.
+        """
+
+        # Find the item by iterating backwards through the list
+        foundItem = False
+        for item in reversed(self.item_list):
+            if item.item_id == item_id:
+                foundItem = True
+                break
+
+        # We don't have this item in our inventory
+        if not foundItem:
+            return False
+
+        self.item_list.remove(item)
+        self.__remove_stats_for_item(item)
+        self.modified = True
+        return True
 
     @property
     def last_item(self):
@@ -92,32 +118,6 @@ class TrackerState(Serializable):
         """ Add a curse to current floor """
         self.last_floor.add_curse(curse)
 
-
-    def add_boss(self, bossid):
-        """ Add boss to seen boss """
-        if bossid not in self.bosses:
-            self.bosses.append(bossid)
-            nbosses = len(self.bosses)
-            if 11 <= nbosses <= 13:
-                suffix = 'th'
-            else:
-                suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(nbosses % 10, 'th')
-            logging.getLogger("tracker").debug("Defeated %s%s boss %s",
-                                               len(self.bosses),
-                                               suffix,
-                                               bossid)
-
-    @property
-    def last_boss(self):
-        """
-        Get last boss encountered
-        Can return None !
-        """
-        if len(self.bosses) > 0:
-            return self.bosses[-1]
-        else:
-            return None
-
     def drawn(self):
         """ Tag this state as rendered """
         self.modified = False
@@ -133,13 +133,6 @@ class TrackerState(Serializable):
             if not floor:
                 return None
             state.add_floor(floor)
-        for bossstr in json_dic['bosses']:
-            # TODO create a serializable boss class that would create
-            # a boss object with description from a bossid
-            # In any case it's sufficient to (de)serialize only bossids
-            if not isinstance(bossstr, basestring):
-                return None
-            state.add_boss(bossstr)
         for item_dic in json_dic['item_list']:
             item = Item.from_json(item_dic, state.floor_list)
             if not item:
@@ -162,6 +155,23 @@ class TrackerState(Serializable):
             if not item_info[transform]:
                 continue
             self.player_transforms[transform].add(item)
+
+    def __remove_stats_for_item(self, item):
+        """
+        Update player's stats with the given item.
+        """
+        item_info = item.info
+        for stat in ItemInfo.stat_list:
+            if not item_info[stat]:
+                continue
+            change = float(item_info[stat])
+            self.player_stats[stat] -= change
+
+        for transform in ItemInfo.transform_list:
+            if not item_info[transform]:
+                continue
+            # TODO Handle transformations
+            #self.player_transforms[transform].add(item)
 
 
 class TrackerStateEncoder(json.JSONEncoder):
